@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity() {
             val (windDir, windLevel) = splitWind(day.wind)
             DayTemp(
                 top = day.weekday,
-                info = day.dayInfo.ifBlank { day.nightInfo },
+                info = safeWeatherInfo(day.dayInfo, day.nightInfo),
                 windDir = windDir,
                 windLevel = windLevel,
                 high = parseTemp(day.high),
@@ -547,6 +547,13 @@ class MainActivity : AppCompatActivity() {
         val t = value.indexOf('T')
         return if (t >= 0 && value.length >= t + 6) value.substring(t + 1, t + 6) else value
     }
+
+    /** 最后一层显示保护，任何数据源的缺失标记都不会直接进入曲线。 */
+    private fun safeWeatherInfo(vararg values: String): String = values.firstOrNull { value ->
+        val text = value.trim()
+        text.isNotEmpty() && text != "-" && text != "--" && text != "9999" &&
+            !text.equals("null", ignoreCase = true)
+    }?.trim() ?: "暂无"
 
     private fun parseTemp(value: String?): Double? {
         if (value.isNullOrBlank() || value == "-") return null

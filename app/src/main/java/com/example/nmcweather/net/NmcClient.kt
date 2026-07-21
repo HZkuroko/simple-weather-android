@@ -75,7 +75,7 @@ object NmcClient {
 
         val aqi = air?.let {
             val a = it.optInt("aqi", -1)
-            val t = it.optString("text", "")
+            val t = cleanText(it.optString("text", "")).orEmpty()
             if (a >= 0) ("$a " + t).trim() else "-"
         } ?: "-"
 
@@ -91,17 +91,21 @@ object NmcClient {
                 val dayW = day.getJSONObject("weather")
                 val nightW = night.getJSONObject("weather")
                 val dayWind = day.optJSONObject("wind")
-                val windText = listOfNotNull(
-                    dayWind?.optString("direct"),
-                    dayWind?.optString("power")
-                ).filter { it.isNotBlank() && it != "9999" && it != "无持续风向" }
+                val windText = listOf(
+                    dayWind?.optString("direct").orEmpty(),
+                    dayWind?.optString("power").orEmpty()
+                ).mapNotNull(::cleanText)
+                    .filter { it != "无持续风向" }
                     .joinToString(" ")
+                val rawDayInfo = dayW.optString("info", "")
+                val rawNightInfo = nightW.optString("info", "")
                 daily.add(
                     DayForecast(
                         date = date,
                         weekday = weekdayOf(date, i),
-                        dayInfo = dayW.optString("info", "-"),
-                        nightInfo = nightW.optString("info", "-"),
+                        // 当天白天时段结束后，接口可能用 9999 表示缺失；此时改用夜间天气。
+                        dayInfo = weatherText(rawDayInfo, rawNightInfo),
+                        nightInfo = weatherText(rawNightInfo, rawDayInfo),
                         high = tempStr(dayW.optString("temperature", "")),
                         low = tempStr(nightW.optString("temperature", "")),
                         wind = windText
@@ -134,11 +138,11 @@ object NmcClient {
             city = station?.optString("city", "-") ?: "-",
             publishTime = real.optString("publish_time", ""),
             nowTemp = cleanNum(weather.optDouble("temperature", 9999.0), "°"),
-            nowInfo = weather.optString("info", "-"),
+            nowInfo = weatherText(weather.optString("info", "")),
             feels = cleanNum(weather.optDouble("feelst", 9999.0), "°"),
             humidity = cleanNum(weather.optDouble("humidity", 9999.0), "%"),
-            windDir = (wind?.optString("direct") ?: "-").ifBlank { "-" },
-            windPower = (wind?.optString("power") ?: "").ifBlank { "" },
+            windDir = cleanText(wind?.optString("direct").orEmpty()) ?: "-",
+            windPower = cleanText(wind?.optString("power").orEmpty()).orEmpty(),
             pressure = cleanNum(weather.optDouble("airpressure", 9999.0), " hPa"),
             aqi = aqi,
             daily = daily,
@@ -153,8 +157,23 @@ object NmcClient {
             s + unit
         }
 
-    private fun tempStr(s: String): String =
-        if (s.isBlank() || s == "9999") "-" else "$s°"
+    private fun cleanText(value: String): String? {
+        val text = value.trim()
+        return text.takeUnless {
+            it.isBlank() || it == "-" || it == "--" || it == "9999" ||
+                it.equals("null", ignoreCase = true)
+        }
+    }
+
+    private fun weatherText(primary: String, fallback: String = ""): String =
+        cleanText(primary) ?: cleanText(fallback) ?: "暂无"
+
+    private fun tempStr(s: String): String {
+        val text = s.trim().removeSuffix("°").removeSuffix("℃")
+        val number = text.toDoubleOrNull()
+        return if (number == null || number.isNaN() || kotlin.math.abs(number) >= 9999.0) "-"
+        else "$text°"
+    }
 
     private fun shortHour(t: String): String {
         val parts = t.split(" ")
