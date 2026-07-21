@@ -136,7 +136,7 @@ class TempCurveView @JvmOverloads constructor(
                 canvas.drawCircle(x, y, 3f * dp, lowDot)
                 canvas.drawText(fmt(it), x, y + 15f * dp, valueLowPaint)
             }
-            canvas.drawText(emojiFor(d0.info), x, emojiY, emojiPaint)
+            canvas.drawText(WeatherIconMapper.iconFor(d0.info), x, emojiY, emojiPaint)
             if (d0.info.isNotBlank()) canvas.drawText(d0.info, x, infoY, infoPaint)
             if (d0.windDir.isNotBlank()) canvas.drawText(d0.windDir, x, windDirY, windPaint)
             if (d0.windLevel.isNotBlank()) canvas.drawText(d0.windLevel, x, windLevelY, windPaint)
@@ -145,14 +145,4 @@ class TempCurveView @JvmOverloads constructor(
 
     private fun fmt(v: Double): String = Math.round(v).toInt().toString() + "°"
 
-    private fun emojiFor(info: String): String = when {
-        info.contains("雪") -> "❄"
-        info.contains("雷") -> "⛈"
-        info.contains("雨") -> "🌧"
-        info.contains("阴") -> "☁"
-        info.contains("多云") -> "⛅"
-        info.contains("晴") -> "☀"
-        info.contains("雾") || info.contains("霾") -> "🌫"
-        else -> "⛅"
-    }
 }

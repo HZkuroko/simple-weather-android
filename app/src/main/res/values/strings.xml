@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">天气</string>
+    <string name="widget_description">显示最近一次更新的当前天气和温度</string>
 </resources>

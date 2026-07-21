@@ -355,28 +355,16 @@
                     android:orientation="vertical"
                     android:paddingTop="10dp">
 
-                    <LinearLayout
+                    <TextView
+                        android:id="@+id/tvRadarTitle"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal"
                         android:paddingStart="14dp"
-                        android:paddingEnd="8dp">
-
-                        <TextView
-                            android:id="@+id/tvRadarTitle"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="雷达图"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-
-                        <Spinner
-                            android:id="@+id/spRegion"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content" />
-                    </LinearLayout>
+                        android:paddingEnd="14dp"
+                        android:paddingBottom="10dp"
+                        android:text="雷达图"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
 
                     <View
                         android:layout_width="match_parent"

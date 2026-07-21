@@ -2,73 +2,122 @@ package com.example.nmcweather
 
 import android.content.Context
 
-/** 简单的本地偏好存储：记住用户选的城市和雷达地区。 */
+/** 本地保存城市、天气数据源、两套行政区和雷达选择。 */
 class Prefs(context: Context) {
     private val sp = context.getSharedPreferences("nmc_weather", Context.MODE_PRIVATE)
 
     var provinceCode: String?
         get() = sp.getString("provinceCode", null)
-        set(v) { sp.edit().putString("provinceCode", v).apply() }
+        set(value) { sp.edit().putString("provinceCode", value).apply() }
 
     var cityCode: String?
         get() = sp.getString("cityCode", null)
-        set(v) { sp.edit().putString("cityCode", v).apply() }
+        set(value) { sp.edit().putString("cityCode", value).apply() }
 
     var cityName: String?
         get() = sp.getString("cityName", null)
-        set(v) { sp.edit().putString("cityName", v).apply() }
+        set(value) { sp.edit().putString("cityName", value).apply() }
 
-    /** 可选的 nmc 区域/气象站；为空时使用城市站点。 */
+    /** nmc 独立行政区/气象站选择。 */
     var areaCode: String?
         get() = sp.getString("areaCode", null)
-        set(v) { sp.edit().putString("areaCode", v).apply() }
+        set(value) { sp.edit().putString("areaCode", value).apply() }
 
     var areaName: String?
         get() = sp.getString("areaName", null)
-        set(v) { sp.edit().putString("areaName", v).apply() }
+        set(value) { sp.edit().putString("areaName", value).apply() }
+
+    /** 和风天气独立行政区选择及坐标。 */
+    var qAreaId: String?
+        get() = sp.getString("qAreaId", null)
+        set(value) { sp.edit().putString("qAreaId", value).apply() }
+
+    var qAreaName: String?
+        get() = sp.getString("qAreaName", null)
+        set(value) { sp.edit().putString("qAreaName", value).apply() }
+
+    var qAreaLon: String?
+        get() = sp.getString("qAreaLon", null)
+        set(value) { sp.edit().putString("qAreaLon", value).apply() }
+
+    var qAreaLat: String?
+        get() = sp.getString("qAreaLat", null)
+        set(value) { sp.edit().putString("qAreaLat", value).apply() }
+
+    /** nmc 或 qweather；凭据缺失时保存阶段会回退为 nmc。 */
+    var weatherSource: String
+        get() = sp.getString("weatherSource", "nmc") ?: "nmc"
+        set(value) { sp.edit().putString("weatherSource", value).apply() }
 
     val weatherCode: String? get() = areaCode ?: cityCode
 
-    val weatherLocationName: String?
+    val nmcLocationName: String?
         get() = (areaName ?: cityName)?.substringBefore('（')?.trim()
 
-    var regionKey: String
-        get() = sp.getString("regionKey", "huanan") ?: "huanan"
-        set(v) { sp.edit().putString("regionKey", v).apply() }
+    val weatherLocationName: String?
+        get() = if (useQWeatherMain) qAreaName ?: cityName else nmcLocationName
 
-    // 和风天气（QWeather）短临降水配置
+    var regionKey: String
+        get() {
+            val old = sp.getString("regionKey", "region_huanan") ?: "region_huanan"
+            return if (old.startsWith("region_") || old.startsWith("station_")) old else "region_$old"
+        }
+        set(value) { sp.edit().putString("regionKey", value).apply() }
+
     var qKey: String?
         get() = sp.getString("qKey", null)
-        set(v) { sp.edit().putString("qKey", v).apply() }
+        set(value) { sp.edit().putString("qKey", value).apply() }
 
     var qHost: String?
         get() = sp.getString("qHost", null)
-        set(v) { sp.edit().putString("qHost", v).apply() }
+        set(value) { sp.edit().putString("qHost", value).apply() }
 
-    // 城市坐标缓存（避免每次都调 GeoAPI）
+    /** 城市级坐标缓存；选择和风区县时优先使用 qAreaLon/qAreaLat。 */
     var coordCity: String?
         get() = sp.getString("coordCity", null)
-        set(v) { sp.edit().putString("coordCity", v).apply() }
+        set(value) { sp.edit().putString("coordCity", value).apply() }
 
     var coordLon: String?
         get() = sp.getString("coordLon", null)
-        set(v) { sp.edit().putString("coordLon", v).apply() }
+        set(value) { sp.edit().putString("coordLon", value).apply() }
 
     var coordLat: String?
         get() = sp.getString("coordLat", null)
-        set(v) { sp.edit().putString("coordLat", v).apply() }
+        set(value) { sp.edit().putString("coordLat", value).apply() }
 
     val hasQWeather: Boolean get() = !qKey.isNullOrBlank() && !qHost.isNullOrBlank()
-
+    val useQWeatherMain: Boolean get() = weatherSource == "qweather" && hasQWeather
     val isConfigured: Boolean get() = !cityCode.isNullOrBlank()
 
-    /** 一次提交选择结果，避免连续触发多次磁盘写入。 */
+    /** 桌面组件读取最近一次成功刷新的缓存。 */
+    val widgetTemp: String? get() = sp.getString("widgetTemp", null)
+    val widgetInfo: String? get() = sp.getString("widgetInfo", null)
+
+    /** 连续两次后台失败后暂停；只能由用户下拉刷新解除。 */
+    val backgroundFailureCount: Int get() = sp.getInt("backgroundFailureCount", 0)
+    val backgroundUpdatesPaused: Boolean get() = backgroundFailureCount >= 2
+
+    fun recordBackgroundFailure(): Int {
+        val next = (backgroundFailureCount + 1).coerceAtMost(2)
+        sp.edit().putInt("backgroundFailureCount", next).commit()
+        return next
+    }
+
+    fun resetBackgroundFailures() {
+        sp.edit().putInt("backgroundFailureCount", 0).commit()
+    }
+
     fun saveSelection(
         province: String?,
         cityCode: String,
         cityName: String,
-        areaCode: String?,
-        areaName: String?,
+        nmcAreaCode: String?,
+        nmcAreaName: String?,
+        qWeatherAreaId: String?,
+        qWeatherAreaName: String?,
+        qWeatherAreaLon: String?,
+        qWeatherAreaLat: String?,
+        source: String,
         region: String,
         qWeatherKey: String?,
         qWeatherHost: String?
@@ -77,15 +126,26 @@ class Prefs(context: Context) {
             .putString("provinceCode", province)
             .putString("cityCode", cityCode)
             .putString("cityName", cityName)
-            .putString("areaCode", areaCode)
-            .putString("areaName", areaName)
+            .putString("areaCode", nmcAreaCode)
+            .putString("areaName", nmcAreaName)
+            .putString("qAreaId", qWeatherAreaId)
+            .putString("qAreaName", qWeatherAreaName)
+            .putString("qAreaLon", qWeatherAreaLon)
+            .putString("qAreaLat", qWeatherAreaLat)
+            .putString("weatherSource", source)
             .putString("regionKey", region)
             .putString("qKey", qWeatherKey)
             .putString("qHost", qWeatherHost)
             .apply()
     }
 
-    /** 批量缓存坐标，城市变化时自动覆盖。 */
+    fun saveWidgetWeather(temp: String, info: String) {
+        sp.edit()
+            .putString("widgetTemp", temp)
+            .putString("widgetInfo", info)
+            .apply()
+    }
+
     fun saveCoordinates(city: String, lon: String, lat: String) {
         sp.edit()
             .putString("coordCity", city)
