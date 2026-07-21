@@ -15,10 +15,11 @@ import com.example.nmcweather.databinding.DialogCityPickerBinding
 import com.example.nmcweather.databinding.ItemHourlyBinding
 import com.example.nmcweather.net.City
 import com.example.nmcweather.net.MinutelyData
+import com.example.nmcweather.net.NanshaClient
+import com.example.nmcweather.net.NanshaSnapshot
 import com.example.nmcweather.net.NmcClient
 import com.example.nmcweather.net.Province
 import com.example.nmcweather.net.QWeatherClient
-import com.example.nmcweather.net.QWeatherLocation
 import com.example.nmcweather.net.WeatherData
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Job
@@ -26,6 +27,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class MainActivity : AppCompatActivity() {
 
@@ -41,6 +47,7 @@ class MainActivity : AppCompatActivity() {
         WeatherUpdateScheduler.schedule(applicationContext)
 
         setupRadarWebView()
+        setupNanshaProbe()
         setupRainActivation()
 
         b.tvCity.setOnClickListener { showCityPicker() }
@@ -75,46 +82,40 @@ class MainActivity : AppCompatActivity() {
             // 主天气与分钟降水彼此隔离：一项失败不会取消另一项。
             val weatherTask = async {
                 runCatching {
-                    if (prefs.useQWeatherMain) fetchQWeatherMain()
-                    else NmcClient.fetchWeather(
+                    NmcClient.fetchWeather(
                         prefs.weatherCode ?: throw IllegalStateException("未选择中央气象局城市")
                     )
                 }
             }
             val rainTask = async { runCatching { refreshMinutely() } }
 
-            weatherTask.await().fold(
-                onSuccess = ::bind,
-                onFailure = { toast("天气更新失败：${it.message ?: "网络错误"}") }
-            )
+            val weatherResult = weatherTask.await()
+            weatherResult.onSuccess { base ->
+                if (prefs.isNansha) {
+                    runCatching { fetchNanshaRendered() }.fold(
+                        onSuccess = { snapshot ->
+                            bind(NanshaClient.merge(base, snapshot))
+                            showNanshaDetails(snapshot)
+                        },
+                        onFailure = {
+                            bind(base)
+                            showNanshaFallback()
+                            toast("南沙天气获取失败，已回退到番禺")
+                        }
+                    )
+                } else {
+                    b.tvNanshaDetails.visibility = View.GONE
+                    bind(base)
+                }
+            }.onFailure { toast("天气更新失败：${it.message ?: "网络错误"}") }
             rainTask.await().onFailure { showRainError(it.message) }
             b.swipe.isRefreshing = false
         }
     }
 
-    private suspend fun fetchQWeatherMain(): WeatherData {
-        val host = prefs.qHost ?: throw IllegalStateException("和风 Host 为空")
-        val key = prefs.qKey ?: throw IllegalStateException("和风 API Key 为空")
-        val selectedId = prefs.qAreaId
-        if (!selectedId.isNullOrBlank()) {
-            return QWeatherClient.fetchWeather(
-                host,
-                key,
-                selectedId,
-                prefs.qAreaName ?: prefs.cityName ?: "所选地区"
-            )
-        }
-
-        val cityName = prefs.cityName ?: throw IllegalStateException("未选择城市")
-        val location = QWeatherClient.lookupOne(host, key, cityName)
-            ?: throw IllegalStateException("和风 GeoAPI 找不到「$cityName」")
-        prefs.saveCoordinates(cityName, location.lon, location.lat)
-        return QWeatherClient.fetchWeather(host, key, location.id, cityName)
-    }
-
     private fun bind(d: WeatherData) {
         val city = prefs.cityName ?: d.city
-        val area = if (prefs.useQWeatherMain) prefs.qAreaName else prefs.areaName
+        val area = prefs.areaName
         val displayName = if (!area.isNullOrBlank() && area != city) "$city · $area" else city
         b.tvCity.text = "$displayName ▾"
         b.tvPublishTime.text = if (d.publishTime.isNotBlank()) "更新于 ${d.publishTime}" else ""
@@ -153,6 +154,20 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun showNanshaDetails(snapshot: NanshaSnapshot) {
+        val parts = buildList {
+            snapshot.hourRain?.let { add("南沙小时雨量 $it mm") }
+            snapshot.shortForecast?.let { add(it) }
+        }
+        b.tvNanshaDetails.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
+        b.tvNanshaDetails.text = parts.joinToString("\n")
+    }
+
+    private fun showNanshaFallback() {
+        b.tvNanshaDetails.visibility = View.VISIBLE
+        b.tvNanshaDetails.text = "南沙天气暂不可用，当前显示番禺补齐数据"
+    }
+
     // ---------------- 雷达 ----------------
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
@@ -173,13 +188,53 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupNanshaProbe() {
+        b.webNanshaProbe.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            loadsImagesAutomatically = false
+        }
+    }
+
+    /**
+     * 南沙官网的实况由 JavaScript 动态写入页面。这里仅在前台刷新时读取
+     * 渲染后的纯文本；后台 Worker 始终使用番禺 NMC，避免后台创建 WebView。
+     */
+    private suspend fun fetchNanshaRendered(): NanshaSnapshot = withTimeout(20_000L) {
+        suspendCancellableCoroutine { continuation ->
+            val web = b.webNanshaProbe
+            var evaluated = false
+            web.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (evaluated || !continuation.isActive) return
+                    evaluated = true
+                    view.postDelayed({
+                        if (!continuation.isActive) return@postDelayed
+                        view.evaluateJavascript("(function(){return document.body ? document.body.innerText : '';})()") { encoded ->
+                            if (!continuation.isActive) return@evaluateJavascript
+                            try {
+                                val text = JSONArray("[$encoded]").getString(0)
+                                continuation.resume(NanshaClient.parseRenderedText(text))
+                            } catch (e: Exception) {
+                                continuation.resumeWithException(e)
+                            }
+                        }
+                    }, 5_000L)
+                }
+            }
+            continuation.invokeOnCancellation { web.stopLoading() }
+            web.loadUrl(NanshaClient.PAGE_URL)
+        }
+    }
+
     private fun loadRadar() {
         val radar = RadarRegions.item(prefs.regionKey)
         b.tvRadarTitle.text = "雷达图 · ${radar.name}"
         b.webRadar.loadUrl(radar.url)
     }
 
-    // ---------------- 城市 / 数据源 / 行政区选择 ----------------
+    // ---------------- 城市 / 行政区 / 雷达设置 ----------------
 
     private fun showCityPicker() {
         val db = DialogCityPickerBinding.inflate(layoutInflater)
@@ -225,79 +280,13 @@ class MainActivity : AppCompatActivity() {
 
         db.etQKey.setText(prefs.qKey.orEmpty())
         db.etQHost.setText(prefs.qHost.orEmpty())
-        if (prefs.weatherSource == "qweather") db.rbQWeather.isChecked = true
-        else db.rbNmc.isChecked = true
 
         var provinces: List<Province> = emptyList()
         var cities: List<City> = emptyList()
-        var nmcAreas: List<City> = emptyList()
-        var qAreas: List<QWeatherLocation> = emptyList()
-        db.spQArea.adapter = spinnerAdapter(listOf("不选择（使用城市级天气）"))
-
-        fun updateSourceVisibility() {
-            val useQ = db.rbQWeather.isChecked
-            db.layoutQArea.visibility = if (useQ) View.VISIBLE else View.GONE
-            db.layoutNmcArea.visibility = if (useQ) View.GONE else View.VISIBLE
-        }
-        updateSourceVisibility()
-
-        fun clearQAreas() {
-            qAreas = emptyList()
-            db.spQArea.adapter = spinnerAdapter(listOf("不选择（使用城市级天气）"))
-            db.tvQAreaHint.text = "先填写 Key 和 Host，再加载当前城市的和风行政区；保持“不选择”时使用城市级天气。"
-        }
-
-        fun loadQAreas() {
-            val city = cities.getOrNull(db.spCity.selectedItemPosition)
-            if (city == null) {
-                toast("请先选择城市")
-                return
-            }
-            val key = db.etQKey.text.toString().trim()
-            val host = db.etQHost.text.toString().trim()
-            if (key.isBlank() || host.isBlank()) {
-                toast("请先填写和风 API Key 与 Host")
-                return
-            }
-            db.btnLoadQAreas.isEnabled = false
-            db.btnLoadQAreas.text = "正在加载…"
-            db.tvQAreaHint.text = "正在通过和风 GeoAPI 加载 ${city.name} 的行政区…"
-            lifecycleScope.launch {
-                try {
-                    qAreas = QWeatherClient.searchDistricts(host, key, city.name)
-                    val labels = listOf("不选择（使用${city.name}）") +
-                        qAreas.map { "${it.name}（${it.adm2}）" }
-                    db.spQArea.adapter = spinnerAdapter(labels)
-                    val saved = qAreas.indexOfFirst { it.id == prefs.qAreaId }
-                    if (saved >= 0) db.spQArea.setSelection(saved + 1)
-                    db.tvQAreaHint.text = if (qAreas.isEmpty()) {
-                        "和风未返回可用区县，可保持“不选择”使用城市级天气。"
-                    } else {
-                        "已加载 ${qAreas.size} 个和风行政区；下拉框最多显示 5 行，可继续滚动。"
-                    }
-                } catch (e: Exception) {
-                    clearQAreas()
-                    db.tvQAreaHint.text = "加载失败：${e.message ?: "请检查权限与网络"}"
-                    toast("和风行政区加载失败")
-                } finally {
-                    db.btnLoadQAreas.isEnabled = true
-                    db.btnLoadQAreas.text = "加载 / 刷新和风行政区"
-                }
-            }
-        }
-
-        db.rgWeatherSource.setOnCheckedChangeListener { _, checkedId ->
-            updateSourceVisibility()
-            if (checkedId == db.rbQWeather.id && qAreas.isEmpty() &&
-                db.etQKey.text.isNotBlank() && db.etQHost.text.isNotBlank() && cities.isNotEmpty()
-            ) {
-                loadQAreas()
-            }
-        }
-        db.btnLoadQAreas.setOnClickListener { loadQAreas() }
+        var areas: List<City> = emptyList()
 
         val dialog = MaterialAlertDialogBuilder(this)
-            .setTitle("初始设置 / 天气来源")
+            .setTitle("天气与雷达设置")
             .setView(db.root)
             .setCancelable(prefs.isConfigured)
             .setPositiveButton("确定", null)
@@ -311,30 +300,22 @@ class MainActivity : AppCompatActivity() {
                         toast("请先选择城市")
                         return@setOnClickListener
                     }
-                    val nmcArea = if (db.spNmcArea.selectedItemPosition > 0) {
-                        nmcAreas.getOrNull(db.spNmcArea.selectedItemPosition - 1)
+                    val area = if (db.spNmcArea.selectedItemPosition > 0) {
+                        areas.getOrNull(db.spNmcArea.selectedItemPosition - 1)
                     } else null
-                    val qArea = if (db.spQArea.selectedItemPosition > 0) {
-                        qAreas.getOrNull(db.spQArea.selectedItemPosition - 1)
-                    } else null
-                    val qKey = db.etQKey.text.toString().trim().takeIf { it.isNotEmpty() }
-                    val qHost = db.etQHost.text.toString().trim().takeIf { it.isNotEmpty() }
-                    val requestedQ = db.rbQWeather.isChecked
-                    val effectiveSource = if (requestedQ && qKey != null && qHost != null) {
-                        "qweather"
-                    } else {
-                        "nmc"
-                    }
-                    if (requestedQ && effectiveSource == "nmc") {
-                        toast("Key 或 Host 留空，已自动改用中央气象局")
+                    val rainKey = db.etQKey.text.toString().trim().takeIf { it.isNotEmpty() }
+                    val rainHost = db.etQHost.text.toString().trim().takeIf { it.isNotEmpty() }
+                    if ((rainKey == null) != (rainHost == null)) {
+                        toast("降雨预测的 API Key 和 Host 需要同时填写，或同时留空")
+                        return@setOnClickListener
                     }
 
                     val radarKey = if (db.spRadarType.selectedItemPosition == 1) {
-                        val radarProvince = RadarRegions.provinces.getOrElse(db.spRadarProvince.selectedItemPosition) {
+                        val province = RadarRegions.provinces.getOrElse(db.spRadarProvince.selectedItemPosition) {
                             RadarRegions.provinces[0]
                         }
-                        radarProvince.stations.getOrElse(db.spRadarStation.selectedItemPosition) {
-                            radarProvince.stations[0]
+                        province.stations.getOrElse(db.spRadarStation.selectedItemPosition) {
+                            province.stations[0]
                         }.id
                     } else {
                         RadarRegions.regions.getOrElse(db.spRadarRegion.selectedItemPosition) {
@@ -346,16 +327,14 @@ class MainActivity : AppCompatActivity() {
                         province = provinces.getOrNull(db.spProvince.selectedItemPosition)?.code,
                         cityCode = city.code,
                         cityName = city.name,
-                        nmcAreaCode = nmcArea?.code,
-                        nmcAreaName = nmcArea?.name,
-                        qWeatherAreaId = qArea?.id,
-                        qWeatherAreaName = qArea?.name,
-                        qWeatherAreaLon = qArea?.lon,
-                        qWeatherAreaLat = qArea?.lat,
-                        source = effectiveSource,
+                        areaCode = area?.code,
+                        areaName = area?.name,
+                        nanshaFallbackCode = if (area?.code == Prefs.NANSHA_AREA_CODE) {
+                            areas.firstOrNull { it.name.contains("番禺") }?.code
+                        } else null,
                         region = radarKey,
-                        qWeatherKey = qKey,
-                        qWeatherHost = qHost
+                        rainApiKey = rainKey,
+                        rainApiHost = rainHost
                     )
                     dialog.dismiss()
                     loadRadar()
@@ -368,42 +347,31 @@ class MainActivity : AppCompatActivity() {
             try {
                 provinces = NmcClient.fetchProvinces()
                 db.spProvince.adapter = spinnerAdapter(provinces.map { it.name })
-                val provinceIndex = provinces.indexOfFirst { it.code == prefs.provinceCode }
+                val initialIndex = provinces.indexOfFirst { it.code == prefs.provinceCode }
                     .let { if (it < 0) 0 else it }
-                db.spProvince.setSelection(provinceIndex)
+                db.spProvince.setSelection(initialIndex, false)
+
+                var loadedProvinceCode: String? = null
+                fun loadProvince(position: Int, keepSaved: Boolean) {
+                    val province = provinces.getOrNull(position) ?: return
+                    if (province.code == loadedProvinceCode) return
+                    loadedProvinceCode = province.code
+                    loadCities(province.code, db, if (keepSaved) prefs.cityCode else null) { loaded ->
+                        cities = loaded
+                        setupAreaPicker(db, loaded, if (keepSaved) prefs.areaCode else null) {
+                            areas = it
+                        }
+                    }
+                }
 
                 db.spProvince.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                     override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
                         val keepSaved = provinces.getOrNull(pos)?.code == prefs.provinceCode
-                        val province = provinces.getOrNull(pos) ?: return
-                        loadCities(province.code, db, if (keepSaved) prefs.cityCode else null) { loaded ->
-                            cities = loaded
-                            setupAreaPicker(
-                                db,
-                                loaded,
-                                if (keepSaved) prefs.areaCode else null,
-                                onAreasChanged = { nmcAreas = it },
-                                onCityChanged = { clearQAreas() }
-                            )
-                            if (keepSaved && db.rbQWeather.isChecked && prefs.hasQWeather) loadQAreas()
-                        }
+                        loadProvince(pos, keepSaved)
                     }
                     override fun onNothingSelected(parent: AdapterView<*>?) = Unit
                 }
-
-                if (provinces.isNotEmpty()) {
-                    loadCities(provinces[provinceIndex].code, db, prefs.cityCode) { loaded ->
-                        cities = loaded
-                        setupAreaPicker(
-                            db,
-                            loaded,
-                            prefs.areaCode,
-                            onAreasChanged = { nmcAreas = it },
-                            onCityChanged = { clearQAreas() }
-                        )
-                        if (db.rbQWeather.isChecked && prefs.hasQWeather) loadQAreas()
-                    }
-                }
+                loadProvince(initialIndex, keepSaved = true)
             } catch (e: Exception) {
                 toast("加载省份失败：${e.message ?: "网络错误"}")
             }
@@ -421,7 +389,7 @@ class MainActivity : AppCompatActivity() {
                 val list = NmcClient.fetchCities(provinceCode)
                 db.spCity.adapter = spinnerAdapter(list.map { it.name })
                 val selected = list.indexOfFirst { it.code == preselectCode }
-                if (selected >= 0) db.spCity.setSelection(selected)
+                db.spCity.setSelection(if (selected >= 0) selected else 0, false)
                 onLoaded(list)
             } catch (e: Exception) {
                 toast("加载城市失败：${e.message ?: "网络错误"}")
@@ -433,25 +401,30 @@ class MainActivity : AppCompatActivity() {
         db: DialogCityPickerBinding,
         stations: List<City>,
         preselectAreaCode: String?,
-        onAreasChanged: (List<City>) -> Unit,
-        onCityChanged: () -> Unit
+        onAreasChanged: (List<City>) -> Unit
     ) {
         fun update(cityPosition: Int, areaCode: String?) {
             val selectedCity = stations.getOrNull(cityPosition) ?: return
             val candidates = stations.filter { it.code != selectedCity.code }
+            val specialAreas = if (selectedCity.name.contains("广州")) {
+                listOf(City(Prefs.NANSHA_AREA_CODE, "南沙区（南沙天气）"))
+            } else emptyList()
+            val selectableAreas = specialAreas + candidates
             db.spNmcArea.adapter = spinnerAdapter(
-                listOf("不选择（使用${selectedCity.name}）") + candidates.map { it.name }
+                listOf("不选择（使用${selectedCity.name}）") + selectableAreas.map { it.name }
             )
-            val areaIndex = candidates.indexOfFirst { it.code == areaCode }
-            db.spNmcArea.setSelection(if (areaIndex >= 0) areaIndex + 1 else 0)
-            onAreasChanged(candidates)
+            val areaIndex = selectableAreas.indexOfFirst { it.code == areaCode }
+            db.spNmcArea.setSelection(if (areaIndex >= 0) areaIndex + 1 else 0, false)
+            onAreasChanged(selectableAreas)
         }
 
         update(db.spCity.selectedItemPosition.coerceAtLeast(0), preselectAreaCode)
+        var firstCityCallback = true
         db.spCity.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, pos: Int, id: Long) {
-                update(pos, null)
-                onCityChanged()
+                val keepSaved = firstCityCallback && stations.getOrNull(pos)?.code == prefs.cityCode
+                firstCityCallback = false
+                update(pos, if (keepSaved) preselectAreaCode else null)
             }
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
@@ -503,18 +476,14 @@ class MainActivity : AppCompatActivity() {
             val host = prefs.qHost!!
             val key = prefs.qKey!!
             val locationName = prefs.weatherLocationName.orEmpty()
-            var lon = prefs.qAreaLon
-            var lat = prefs.qAreaLat
-            if (lon.isNullOrBlank() || lat.isNullOrBlank()) {
-                lon = prefs.coordLon
-                lat = prefs.coordLat
-                if (lon.isNullOrBlank() || lat.isNullOrBlank() || prefs.coordCity != locationName) {
-                    val location = QWeatherClient.lookupOne(host, key, locationName)
-                        ?: throw IllegalStateException("和风天气找不到「$locationName」的坐标")
-                    lon = location.lon
-                    lat = location.lat
-                    prefs.saveCoordinates(locationName, lon, lat)
-                }
+            var lon = prefs.coordLon
+            var lat = prefs.coordLat
+            if (lon.isNullOrBlank() || lat.isNullOrBlank() || prefs.coordCity != locationName) {
+                val location = QWeatherClient.lookupOne(host, key, locationName, prefs.cityName)
+                    ?: throw IllegalStateException("和风天气找不到「$locationName」的坐标")
+                lon = location.lon
+                lat = location.lat
+                prefs.saveCoordinates(locationName, lon, lat)
             }
             bindMinutely(QWeatherClient.fetchMinutely(host, key, lon!!, lat!!))
         } catch (e: Exception) {
@@ -617,6 +586,12 @@ class MainActivity : AppCompatActivity() {
             loadUrl("about:blank")
             stopLoading()
             clearHistory()
+            removeAllViews()
+            destroy()
+        }
+        b.webNanshaProbe.apply {
+            loadUrl("about:blank")
+            stopLoading()
             removeAllViews()
             destroy()
         }

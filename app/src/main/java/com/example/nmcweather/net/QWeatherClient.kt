@@ -1,18 +1,15 @@
 package com.example.nmcweather.net
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.time.LocalDate
 import java.util.Locale
 
-/** 和风天气：GeoAPI、区县天气和分钟级降水。 */
+/** 和风天气只负责 GeoAPI 定位和分钟级降水。 */
 object QWeatherClient {
     private const val UA =
         "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 " +
@@ -48,7 +45,7 @@ object QWeatherClient {
     }
 
     private suspend fun getJson(host: String, path: String, params: String, key: String): JSONObject {
-        val url = "https://${normHost(host)}$path?$params&key=${enc(key)}"
+        val url = "https://" + normHost(host) + path + "?" + params + "&key=" + enc(key)
         val root = JSONObject(httpGet(url))
         val code = root.optString("code")
         if (code != "200") {
@@ -57,106 +54,35 @@ object QWeatherClient {
         return root
     }
 
-    suspend fun lookupOne(host: String, key: String, name: String, adm: String? = null): QWeatherLocation? {
+    /** 将中央气象局所选城市/区县解析为分钟降水所需坐标。 */
+    suspend fun lookupOne(
+        host: String,
+        key: String,
+        name: String,
+        adm: String? = null
+    ): QWeatherLocation? {
         if (name.isBlank()) return null
-        val admPart = adm?.takeIf { it.isNotBlank() }?.let { "&adm=${enc(it)}" }.orEmpty()
+        val admPart = adm?.takeIf { it.isNotBlank() && normalizeName(it) != normalizeName(name) }
+            ?.let { "&adm=${enc(it)}" }
+            .orEmpty()
         val root = getJson(
             host,
             "/geo/v2/city/lookup",
-            "location=${enc(name)}$admPart&range=cn&number=1&lang=zh",
+            "location=${enc(name)}$admPart&range=cn&number=10&lang=zh",
             key
         )
-        return root.optJSONArray("location")?.let { if (it.length() > 0) parseLocation(it.getJSONObject(0)) else null }
-    }
-
-    suspend fun geoLookup(host: String, key: String, cityName: String): Pair<String, String>? =
-        lookupOne(host, key, cityName)?.let { it.lon to it.lat }
-
-    /**
-     * GeoAPI 没有“列出全部下级行政区”端点，因此使用“区/县/旗”关键词并用 adm 限定城市，
-     * 合并去重后作为和风独立行政区列表。
-     */
-    suspend fun searchDistricts(host: String, key: String, cityName: String): List<QWeatherLocation> {
-        val result = LinkedHashMap<String, QWeatherLocation>()
-        for (word in listOf("区", "县", "旗")) {
-            val root = getJson(
-                host,
-                "/geo/v2/city/lookup",
-                "location=${enc(word)}&adm=${enc(cityName)}&range=cn&number=20&lang=zh",
-                key
-            )
-            val array = root.optJSONArray("location") ?: continue
-            for (i in 0 until array.length()) {
-                val location = parseLocation(array.getJSONObject(i))
-                if (location.name != cityName && location.adm2.contains(cityName.removeSuffix("市"))) {
-                    result[location.id] = location
-                }
-            }
+        val array = root.optJSONArray("location") ?: return null
+        val expectedName = normalizeName(name)
+        val expectedAdm = adm?.let(::normalizeName).orEmpty()
+        var first: QWeatherLocation? = null
+        for (i in 0 until array.length()) {
+            val location = parseLocation(array.getJSONObject(i))
+            if (first == null) first = location
+            val sameName = normalizeName(location.name) == expectedName
+            val sameAdm = expectedAdm.isBlank() || normalizeName(location.adm2).contains(expectedAdm)
+            if (sameName && sameAdm) return location
         }
-        return result.values.sortedBy { it.name }
-    }
-
-    suspend fun fetchWeather(
-        host: String,
-        key: String,
-        location: String,
-        displayName: String
-    ): WeatherData = coroutineScope {
-        val loc = enc(location)
-        val nowTask = async { getJson(host, "/v7/weather/now", "location=$loc&lang=zh", key) }
-        val hourTask = async { getJson(host, "/v7/weather/24h", "location=$loc&lang=zh", key) }
-        val dayTask = async { getJson(host, "/v7/weather/7d", "location=$loc&lang=zh", key) }
-
-        val nowRoot = nowTask.await()
-        val hourRoot = hourTask.await()
-        val dayRoot = dayTask.await()
-        val now = nowRoot.getJSONObject("now")
-
-        val hourly = ArrayList<HourObs>()
-        val hourArray = hourRoot.optJSONArray("hourly") ?: JSONArray()
-        for (i in 0 until minOf(24, hourArray.length())) {
-            val item = hourArray.getJSONObject(i)
-            hourly += HourObs(
-                time = shortTime(item.optString("fxTime")),
-                temp = valueWithUnit(item.optString("temp"), "°"),
-                rain = item.optString("precip", "-"),
-                humidity = valueWithUnit(item.optString("humidity"), "%")
-            )
-        }
-
-        val daily = ArrayList<DayForecast>()
-        val dayArray = dayRoot.optJSONArray("daily") ?: JSONArray()
-        for (i in 0 until minOf(5, dayArray.length())) {
-            val item = dayArray.getJSONObject(i)
-            val date = item.optString("fxDate")
-            daily += DayForecast(
-                date = date,
-                weekday = weekdayOf(date, i),
-                dayInfo = item.optString("textDay", "-"),
-                nightInfo = item.optString("textNight", "-"),
-                high = valueWithUnit(item.optString("tempMax"), "°"),
-                low = valueWithUnit(item.optString("tempMin"), "°"),
-                wind = listOf(
-                    item.optString("windDirDay"),
-                    valueWithUnit(item.optString("windScaleDay"), "级")
-                ).filter { it.isNotBlank() && it != "-" }.joinToString(" ")
-            )
-        }
-
-        WeatherData(
-            city = displayName,
-            publishTime = formatUpdateTime(nowRoot.optString("updateTime")),
-            nowTemp = valueWithUnit(now.optString("temp"), "°"),
-            nowInfo = now.optString("text", "-"),
-            feels = valueWithUnit(now.optString("feelsLike"), "°"),
-            humidity = valueWithUnit(now.optString("humidity"), "%"),
-            windDir = now.optString("windDir", "-"),
-            windPower = valueWithUnit(now.optString("windScale"), "级"),
-            pressure = valueWithUnit(now.optString("pressure"), " hPa"),
-            aqi = "-",
-            daily = daily,
-            hourly = hourly
-        )
+        return if (expectedAdm.isBlank()) first else null
     }
 
     suspend fun fetchMinutely(host: String, key: String, lon: String, lat: String): MinutelyData {
@@ -175,35 +101,21 @@ object QWeatherClient {
         return MinutelyData(root.optString("summary"), points)
     }
 
+    private fun normalizeName(value: String): String = value.trim()
+        .substringBefore('（')
+        .substringBefore('(')
+        .removeSuffix("市")
+        .removeSuffix("区")
+        .removeSuffix("县")
+        .trim()
+
     private fun parseLocation(item: JSONObject) = QWeatherLocation(
-        id = item.optString("id"),
         name = item.optString("name"),
         adm2 = item.optString("adm2"),
-        adm1 = item.optString("adm1"),
         lat = item.optString("lat"),
         lon = item.optString("lon")
     )
 
     private fun trim2(value: String): String =
         value.toDoubleOrNull()?.let { String.format(Locale.US, "%.2f", it) } ?: value
-
-    private fun valueWithUnit(value: String?, unit: String): String =
-        value?.takeIf { it.isNotBlank() && it != "9999" }?.plus(unit) ?: "-"
-
-    private fun shortTime(value: String): String {
-        val t = value.indexOf('T')
-        return if (t >= 0 && value.length >= t + 6) value.substring(t + 1, t + 6) else value
-    }
-
-    private fun formatUpdateTime(value: String): String =
-        if (value.length >= 16) value.substring(0, 16).replace('T', ' ') else value
-
-    private fun weekdayOf(date: String, index: Int): String = try {
-        when (LocalDate.parse(date.take(10)).dayOfWeek.value) {
-            1 -> "周一"; 2 -> "周二"; 3 -> "周三"; 4 -> "周四"
-            5 -> "周五"; 6 -> "周六"; else -> "周日"
-        }
-    } catch (_: Exception) {
-        if (index == 0) "今天" else ""
-    }
 }

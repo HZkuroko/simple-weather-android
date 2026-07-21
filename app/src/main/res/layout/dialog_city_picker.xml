@@ -16,42 +16,6 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="天气数据源"
-            android:textColor="@color/gray"
-            android:textSize="13sp" />
-
-        <RadioGroup
-            android:id="@+id/rgWeatherSource"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <RadioButton
-                android:id="@+id/rbNmc"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:checked="true"
-                android:text="中央气象局" />
-
-            <RadioButton
-                android:id="@+id/rbQWeather"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="12dp"
-                android:text="和风天气" />
-        </RadioGroup>
-
-        <TextView
-            android:id="@+id/tvSourceHint"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="和风模式只有在 API Key 和 Host 均已填写时生效，否则自动使用中央气象局。"
-            android:textColor="@color/section_label"
-            android:textSize="12sp" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
             android:text="省份"
             android:textColor="@color/gray"
@@ -78,8 +42,16 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="降雨预测（可选）"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
-            android:text="和风天气 API Key（可留空）"
+            android:text="分钟降雨预测 API Key（可留空）"
             android:textColor="@color/gray"
             android:textSize="13sp" />
 
@@ -95,7 +67,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="和风天气 API Host"
+            android:text="分钟降雨预测 API Host"
             android:textColor="@color/gray"
             android:textSize="13sp" />
 
@@ -111,12 +83,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="使用和风区县天气需在凭据权限中启用：GeoAPI、天气预报；分钟降水功能还需启用“分钟降水”。"
+            android:text="仅用于降雨预测；和风凭据只需启用 GeoAPI 和“分钟降水”。留空时主天气仍正常使用中央气象局。"
             android:textColor="@color/section_label"
             android:textSize="12sp" />
 
         <LinearLayout
-            android:id="@+id/layoutNmcArea"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
@@ -139,43 +110,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="仅提供中国气象局可用的区域站点，请自行选择距离最近的区域；没有合适选项时保持“不选择”。"
-                android:textColor="@color/section_label"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/layoutQArea"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="和风行政区（独立列表，可选）"
-                android:textColor="@color/gray"
-                android:textSize="13sp" />
-
-            <com.example.nmcweather.LimitedSpinner
-                android:id="@+id/spQArea"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content" />
-
-            <Button
-                android:id="@+id/btnLoadQAreas"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="end"
-                android:text="加载 / 刷新和风行政区"
-                android:textAllCaps="false" />
-
-            <TextView
-                android:id="@+id/tvQAreaHint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="先填写 Key 和 Host，再加载当前城市的和风行政区；保持“不选择”时使用城市级天气。"
                 android:textColor="@color/section_label"
                 android:textSize="12sp" />
         </LinearLayout>

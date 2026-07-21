@@ -5,10 +5,8 @@ data class Province(val code: String, val name: String)
 data class City(val code: String, val name: String)
 
 data class QWeatherLocation(
-    val id: String,
     val name: String,
     val adm2: String,
-    val adm1: String,
     val lat: String,
     val lon: String
 )

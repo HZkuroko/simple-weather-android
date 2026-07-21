@@ -151,6 +151,15 @@
                             android:layout_weight="1"
                             android:text="空气 --" />
                     </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/tvNanshaDetails"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:textColor="@color/gray"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -380,6 +389,14 @@
                         android:layout_marginTop="6dp" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
+
+            <!-- 仅用于执行南沙官网脚本并读取渲染后的区级实况，不显示给用户。 -->
+            <WebView
+                android:id="@+id/webNanshaProbe"
+                android:layout_width="1dp"
+                android:layout_height="1dp"
+                android:alpha="0.01"
+                android:importantForAccessibility="no" />
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
