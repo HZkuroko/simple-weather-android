@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#2196F3</color>
+    <color name="blue">#1976D2</color>
+    <color name="gray">#6F7782</color>
+    <color name="white">#FFFFFF</color>
+
+    <!-- 页面层级：低对比度分组，清晰但不突兀 -->
+    <color name="screen_bg">#F6F8FA</color>
+    <color name="card_bg">#FFFFFFFF</color>
+    <color name="card_stroke">#E5E9EE</color>
+    <color name="divider">#E9EDF2</color>
+    <color name="section_label">#55758F</color>
+    <color name="current_weather_bg">#F3F9FE</color>
+    <color name="current_weather_stroke">#D8EAF7</color>
+</resources>
