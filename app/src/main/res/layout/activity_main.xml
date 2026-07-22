@@ -28,7 +28,10 @@
                 android:layout_height="wrap_content"
                 android:background="?attr/selectableItemBackgroundBorderless"
                 android:clickable="true"
+                android:contentDescription="@string/change_weather_location"
                 android:focusable="true"
+                android:gravity="center_vertical"
+                android:minHeight="48dp"
                 android:padding="4dp"
                 android:text="选择城市 ▾"
                 android:textSize="24sp"
@@ -41,6 +44,17 @@
                 android:layout_marginStart="4dp"
                 android:textColor="@color/gray"
                 android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvUpdateStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="4dp"
+                android:accessibilityLiveRegion="polite"
+                android:textColor="@color/status_text"
+                android:textSize="12sp"
+                android:visibility="gone" />
 
             <!-- 当前天气：略带蓝色底，作为页面主信息 -->
             <com.google.android.material.card.MaterialCardView
@@ -200,7 +214,9 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:background="?attr/selectableItemBackground"
+                        android:focusable="true"
                         android:gravity="center"
+                        android:minHeight="48dp"
                         android:paddingTop="9dp"
                         android:paddingBottom="9dp"
                         android:text="点击3次启动降雨预测"
@@ -244,7 +260,8 @@
                             android:id="@+id/rainChart"
                             android:layout_width="match_parent"
                             android:layout_height="145dp"
-                            android:layout_marginTop="4dp" />
+                            android:layout_marginTop="4dp"
+                            android:contentDescription="@string/rain_chart_description" />
                     </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -342,6 +359,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="190dp"
                         android:layout_marginTop="6dp"
+                        android:contentDescription="@string/temp_curve_description"
                         android:paddingStart="4dp"
                         android:paddingEnd="4dp" />
                 </LinearLayout>
@@ -386,7 +404,8 @@
                         android:id="@+id/webRadar"
                         android:layout_width="match_parent"
                         android:layout_height="400dp"
-                        android:layout_marginTop="6dp" />
+                        android:layout_marginTop="6dp"
+                        android:contentDescription="@string/radar_description" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -396,7 +415,7 @@
                 android:layout_width="1dp"
                 android:layout_height="1dp"
                 android:alpha="0.01"
-                android:importantForAccessibility="no" />
+                android:importantForAccessibility="noHideDescendants" />
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>

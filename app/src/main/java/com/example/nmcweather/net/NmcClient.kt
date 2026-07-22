@@ -34,8 +34,11 @@ object NmcClient {
         try {
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: throw IllegalStateException("HTTP $code")
+            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                throw IllegalStateException("中央气象台 HTTP $code")
+            }
+            body.ifBlank { throw IllegalStateException("中央气象台返回空内容") }
         } finally {
             conn.disconnect()
         }
@@ -76,7 +79,8 @@ object NmcClient {
         val aqi = air?.let {
             val a = it.optInt("aqi", -1)
             val t = cleanText(it.optString("text", "")).orEmpty()
-            if (a >= 0) ("$a " + t).trim() else "-"
+            // AQI 有效范围 0–500，9999 等超范围值视为缺失，显示为 "-"
+            if (a in 0..500) ("$a " + t).trim() else "-"
         } ?: "-"
 
         val daily = ArrayList<DayForecast>()

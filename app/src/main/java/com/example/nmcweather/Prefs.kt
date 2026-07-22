@@ -9,6 +9,9 @@ class Prefs(context: Context) {
     }
 
     private val sp = context.getSharedPreferences("nmc_weather", Context.MODE_PRIVATE)
+    private val secure = SecurePrefs(context.applicationContext)
+    private var qKeyLoaded = false
+    private var qKeyMemory: String? = null
 
     var provinceCode: String?
         get() = sp.getString("provinceCode", null)
@@ -52,8 +55,30 @@ class Prefs(context: Context) {
         set(value) { sp.edit().putString("regionKey", value).apply() }
 
     var qKey: String?
-        get() = sp.getString("qKey", null)
-        set(value) { sp.edit().putString("qKey", value).apply() }
+        get() {
+            if (qKeyLoaded) return qKeyMemory
+            secure.get("qKey")?.let {
+                qKeyLoaded = true
+                qKeyMemory = it
+                return it
+            }
+            // 从旧版明文 SharedPreferences 一次性迁移，成功后删除明文。
+            val legacy = sp.getString("qKey", null)?.takeIf { it.isNotBlank() }
+            qKeyLoaded = true
+            qKeyMemory = legacy
+            if (legacy == null) return null
+            // 迁移失败时继续保留旧值，避免升级后凭据丢失或启动崩溃。
+            runCatching { secure.put("qKey", legacy) }.onSuccess {
+                sp.edit().remove("qKey").apply()
+            }
+            return legacy
+        }
+        set(value) {
+            secure.put("qKey", value)
+            sp.edit().remove("qKey").apply()
+            qKeyMemory = value?.takeIf { it.isNotBlank() }
+            qKeyLoaded = true
+        }
 
     var qHost: String?
         get() = sp.getString("qHost", null)
@@ -74,6 +99,11 @@ class Prefs(context: Context) {
 
     val hasQWeather: Boolean get() = !qKey.isNullOrBlank() && !qHost.isNullOrBlank()
     val isConfigured: Boolean get() = !cityCode.isNullOrBlank()
+    val cacheKey: String get() = listOf(
+        weatherCode.orEmpty(),
+        weatherLocationName.orEmpty(),
+        cityName.orEmpty()
+    ).joinToString("|")
 
     val widgetTemp: String? get() = sp.getString("widgetTemp", null)
     val widgetInfo: String? get() = sp.getString("widgetInfo", null)
@@ -113,7 +143,6 @@ class Prefs(context: Context) {
             .putString("areaName", areaName)
             .putString("nanshaFallbackCode", nanshaFallbackCode)
             .putString("regionKey", region)
-            .putString("qKey", rainApiKey)
             .putString("qHost", rainApiHost)
             // 清理旧版“和风主天气/和风行政区”配置。
             .remove("weatherSource")
@@ -121,6 +150,10 @@ class Prefs(context: Context) {
             .remove("qAreaName")
             .remove("qAreaLon")
             .remove("qAreaLat")
+            .remove("qKey")
+        secure.put("qKey", rainApiKey)
+        qKeyMemory = rainApiKey?.takeIf { it.isNotBlank() }
+        qKeyLoaded = true
         if (oldLocation != newLocation) {
             editor.remove("coordCity").remove("coordLon").remove("coordLat")
         }

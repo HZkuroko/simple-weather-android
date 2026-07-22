@@ -11,6 +11,15 @@
     <color name="card_stroke">#E5E9EE</color>
     <color name="divider">#E9EDF2</color>
     <color name="section_label">#55758F</color>
+    <color name="status_text">#A05A00</color>
     <color name="current_weather_bg">#F3F9FE</color>
     <color name="current_weather_stroke">#D8EAF7</color>
+
+    <!-- 图表（降水/气温曲线）中性色（白天）。夜间在 values-night 中覆盖。 -->
+    <color name="chart_grid">#EEEEEE</color>
+    <color name="chart_axis">#BDBDBD</color>
+    <color name="chart_axis_text">#757575</color>
+    <color name="chart_hint">#9E9E9E</color>
+    <color name="chart_weekday">#424242</color>
+    <color name="chart_info">#333333</color>
 </resources>

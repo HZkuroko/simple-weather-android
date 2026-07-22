@@ -1,4 +1,8 @@
 <resources>
     <string name="app_name">天气</string>
     <string name="widget_description">显示最近一次更新的当前天气和温度</string>
+    <string name="change_weather_location">更改天气位置和雷达设置</string>
+    <string name="rain_chart_description">未来一小时分钟降雨趋势图</string>
+    <string name="temp_curve_description">未来天气温度趋势图</string>
+    <string name="radar_description">中央气象台雷达图</string>
 </resources>

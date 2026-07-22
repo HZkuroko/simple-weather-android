@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
+import androidx.core.content.ContextCompat
 import kotlin.math.max
 
 /**
@@ -21,10 +22,10 @@ class RainChartView @JvmOverloads constructor(
     private val dp = resources.displayMetrics.density
 
     private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#BDBDBD"); strokeWidth = 1f * dp
+        color = ContextCompat.getColor(context, R.color.chart_axis); strokeWidth = 1f * dp
     }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#EEEEEE"); strokeWidth = 1f * dp
+        color = ContextCompat.getColor(context, R.color.chart_grid); strokeWidth = 1f * dp
     }
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#2196F3"); style = Paint.Style.STROKE
@@ -37,10 +38,10 @@ class RainChartView @JvmOverloads constructor(
         color = Color.parseColor("#2196F3"); style = Paint.Style.FILL
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#757575"); textSize = 10f * dp
+        color = ContextCompat.getColor(context, R.color.chart_axis_text); textSize = 10f * dp
     }
     private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#9E9E9E"); textSize = 13f * dp; textAlign = Paint.Align.CENTER
+        color = ContextCompat.getColor(context, R.color.chart_hint); textSize = 13f * dp; textAlign = Paint.Align.CENTER
     }
 
     fun setData(d: List<Pair<String, Double>>) {

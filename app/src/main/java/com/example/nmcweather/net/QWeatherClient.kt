@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
@@ -15,10 +16,23 @@ object QWeatherClient {
         "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    private fun normHost(value: String): String = value.trim()
-        .removePrefix("https://")
-        .removePrefix("http://")
-        .removeSuffix("/")
+    /** 只接受 HTTPS 主机名；拒绝路径、查询参数、用户信息和自定义端口。 */
+    fun normalizeHost(value: String): String? = try {
+        val raw = value.trim()
+        val uri = URI(if (raw.startsWith("https://", true)) raw else "https://$raw")
+        val host = uri.host?.lowercase(Locale.US)
+        if (host == null || uri.scheme != "https" || uri.userInfo != null || uri.port != -1 ||
+            (uri.path.isNotEmpty() && uri.path != "/") || uri.query != null || uri.fragment != null
+        ) {
+            null
+        } else {
+            host.takeIf {
+                it.contains('.') && it.all { ch -> ch.isLetterOrDigit() || ch == '.' || ch == '-' }
+            }
+        }
+    } catch (_: Exception) {
+        null
+    }
 
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 
@@ -45,7 +59,8 @@ object QWeatherClient {
     }
 
     private suspend fun getJson(host: String, path: String, params: String, key: String): JSONObject {
-        val url = "https://" + normHost(host) + path + "?" + params + "&key=" + enc(key)
+        val normalizedHost = normalizeHost(host) ?: throw IllegalStateException("和风 API Host 格式无效")
+        val url = "https://" + normalizedHost + path + "?" + params + "&key=" + enc(key)
         val root = JSONObject(httpGet(url))
         val code = root.optString("code")
         if (code != "200") {

@@ -60,7 +60,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="粘贴你的 API KEY"
-            android:inputType="text"
+            android:inputType="textPassword"
             android:maxLines="1" />
 
         <TextView
@@ -83,7 +83,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="仅用于降雨预测；和风凭据只需启用 GeoAPI 和“分钟降水”。留空时主天气仍正常使用中央气象局。"
+            android:text="仅用于降雨预测；和风凭据只需启用 GeoAPI 和“分钟降水”。留空时主天气仍正常使用中央气象局；清空 Key 和 Host 后保存即可删除凭据。"
             android:textColor="@color/section_label"
             android:textSize="12sp" />
 

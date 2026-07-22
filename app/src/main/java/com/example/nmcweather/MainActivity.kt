@@ -1,8 +1,10 @@
 package com.example.nmcweather
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.AdapterView
@@ -23,6 +25,7 @@ import com.example.nmcweather.net.QWeatherClient
 import com.example.nmcweather.net.WeatherData
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -30,21 +33,56 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val KEY_RADAR_WEBVIEW_STATE = "radar_webview_state"
+    }
+
+    /** 仅跨配置切换保留轻量 UI 数据，不持有 Activity/View，避免内存泄漏。 */
+    private data class RetainedUiState(
+        val weather: WeatherData?,
+        val weatherSavedAt: Long,
+        val nanshaDetails: String?,
+        val rain: RainUiState,
+        val rainSavedAt: Long,
+        val updateStatus: String?
+    )
+
+    private sealed class RainUiState {
+        object Locked : RainUiState()
+        data class Content(val data: MinutelyData) : RainUiState()
+        data class Error(val message: String) : RainUiState()
+    }
+
     private lateinit var b: ActivityMainBinding
     private lateinit var prefs: Prefs
+    private lateinit var cache: WeatherCache
     private var foregroundRefreshJob: Job? = null
+    private var refreshJob: Job? = null
+    private var lastWeather: WeatherData? = null
+    private var lastWeatherSavedAt: Long = 0L
+    private var lastNanshaDetails: String? = null
+    private var rainUiState: RainUiState = RainUiState.Locked
+    private var lastRainSavedAt: Long = 0L
+    private var lastUpdateStatus: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
         prefs = Prefs(this)
-        WeatherUpdateScheduler.schedule(applicationContext)
+        cache = WeatherCache(applicationContext)
+        // 配置切换会重建 Activity；后台任务只需在真正冷启动时确认一次。
+        if (savedInstanceState == null) {
+            WeatherUpdateScheduler.schedule(applicationContext)
+        }
 
         setupRadarWebView()
         setupNanshaProbe()
@@ -55,65 +93,114 @@ class MainActivity : AppCompatActivity() {
             // 只有用户主动下拉，才解除“后台连续失败两次”的暂停状态。
             prefs.resetBackgroundFailures()
             WeatherUpdateScheduler.schedule(applicationContext)
-            refreshAll(initial = false)
+            hideUpdateStatus()
+            refreshAll(initial = false, force = true)
         }
 
-        // 冷启动立即更新；此外后台任务约每半小时同步一次桌面组件。
+        val retained = lastCustomNonConfigurationInstance as? RetainedUiState
+
+        // 冷启动立即更新；配置切换时优先恢复内存数据和 WebView，避免重复联网。
         if (savedInstanceState == null) {
             if (prefs.isConfigured) {
                 loadRadar()
+                restoreDiskCache()
                 refreshAll(initial = true)
             } else {
                 showCityPicker()
+            }
+        } else if (!prefs.isConfigured) {
+            showCityPicker()
+        } else {
+            if (!restoreRadar(savedInstanceState)) loadRadar()
+            if (retained?.weather != null) {
+                lastWeatherSavedAt = retained.weatherSavedAt
+                lastRainSavedAt = retained.rainSavedAt
+                bind(retained.weather, updateWidget = false)
+                restoreNanshaDetails(retained.nanshaDetails)
+                restoreRainState(retained.rain)
+                retained.updateStatus?.let(::showUpdateStatus)
+            } else {
+                // 进程被系统回收后没有内存缓存，只在这种情况下重新请求。
+                restoreDiskCache()
+                refreshAll(initial = true)
             }
         }
     }
 
     // ---------------- 天气 ----------------
 
-    private fun refreshAll(initial: Boolean) {
+    private fun refreshAll(initial: Boolean, force: Boolean = false) {
         if (!prefs.isConfigured) {
             b.swipe.isRefreshing = false
             return
         }
+        // 定时刷新或连续下拉时不叠加请求；城市改变等 initial 刷新则替换旧任务。
+        if (refreshJob?.isActive == true) {
+            if (!initial && !force) {
+                b.swipe.isRefreshing = false
+                return
+            }
+            refreshJob?.cancel()
+        }
         if (!initial) b.webRadar.reload()
         b.swipe.post { b.swipe.isRefreshing = true }
-        lifecycleScope.launch {
-            // 主天气与分钟降水彼此隔离：一项失败不会取消另一项。
-            val weatherTask = async {
-                runCatching {
-                    NmcClient.fetchWeather(
-                        prefs.weatherCode ?: throw IllegalStateException("未选择中央气象局城市")
-                    )
+        refreshJob = lifecycleScope.launch {
+            val thisJob = coroutineContext[Job]
+            try {
+                // 主天气与分钟降水彼此隔离：一项失败不会取消另一项。
+                val weatherTask = async {
+                    suspendResult {
+                        WeatherRepository.fetch(applicationContext, prefs, force = force)
+                    }
+                }
+                val rainTask = async { suspendResult { refreshMinutely() } }
+
+                val weatherResult = weatherTask.await()
+                weatherResult.onSuccess { fetch ->
+                    val base = fetch.data
+                    if (prefs.isNansha) {
+                        suspendResult { fetchNanshaRendered() }.fold(
+                            onSuccess = { snapshot ->
+                                bind(NanshaClient.merge(base, snapshot))
+                                showNanshaDetails(snapshot)
+                            },
+                            onFailure = {
+                                bind(base, updateWidget = !fetch.fromRecentCache)
+                                showNanshaFallback()
+                                toast("南沙天气获取失败，已回退到番禺")
+                            }
+                        )
+                    } else {
+                        b.tvNanshaDetails.visibility = View.GONE
+                        lastNanshaDetails = null
+                        bind(base, updateWidget = !fetch.fromRecentCache)
+                    }
+                    if (fetch.fromRecentCache) hideUpdateStatus()
+                }.onFailure {
+                    showWeatherError(it.message)
+                    toast("天气更新失败：${it.message ?: "网络错误"}")
+                }
+                rainTask.await().onFailure { showRainError(it.message) }
+            } finally {
+                if (refreshJob === thisJob) {
+                    b.swipe.isRefreshing = false
+                    refreshJob = null
                 }
             }
-            val rainTask = async { runCatching { refreshMinutely() } }
-
-            val weatherResult = weatherTask.await()
-            weatherResult.onSuccess { base ->
-                if (prefs.isNansha) {
-                    runCatching { fetchNanshaRendered() }.fold(
-                        onSuccess = { snapshot ->
-                            bind(NanshaClient.merge(base, snapshot))
-                            showNanshaDetails(snapshot)
-                        },
-                        onFailure = {
-                            bind(base)
-                            showNanshaFallback()
-                            toast("南沙天气获取失败，已回退到番禺")
-                        }
-                    )
-                } else {
-                    b.tvNanshaDetails.visibility = View.GONE
-                    bind(base)
-                }
-            }.onFailure { toast("天气更新失败：${it.message ?: "网络错误"}") }
-            rainTask.await().onFailure { showRainError(it.message) }
-            b.swipe.isRefreshing = false
         }
     }
 
-    private fun bind(d: WeatherData) {
+    /** runCatching 会吞掉 CancellationException；网络任务取消必须继续向上传播。 */
+    private suspend fun <T> suspendResult(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
+
+    private fun bind(d: WeatherData, updateWidget: Boolean = true) {
+        lastWeather = d
         val city = prefs.cityName ?: d.city
         val area = prefs.areaName
         val displayName = if (!area.isNullOrBlank() && area != city) "$city · $area" else city
@@ -127,9 +214,14 @@ class MainActivity : AppCompatActivity() {
         b.tvNowPressure.text = "气压 ${d.pressure}"
         b.tvNowAqi.text = "空气 ${d.aqi}"
 
-        // 主天气成功后同步桌面组件；组件本身不发起网络请求。
-        prefs.saveWidgetWeather(d.nowTemp, d.nowInfo)
-        WeatherWidgetProvider.updateAll(this)
+        // 仅新数据同步桌面组件；配置切换恢复 UI 时不做重复磁盘写入和组件刷新。
+        if (updateWidget) {
+            lastWeatherSavedAt = System.currentTimeMillis()
+            cache.saveWeather(prefs.cacheKey, d, lastWeatherSavedAt)
+            prefs.saveWidgetWeather(d.nowTemp, d.nowInfo)
+            WeatherWidgetProvider.updateAll(this)
+            hideUpdateStatus()
+        }
 
         b.llHourly.removeAllViews()
         for (h in d.hourly) {
@@ -152,6 +244,7 @@ class MainActivity : AppCompatActivity() {
                 low = parseTemp(day.low)
             )
         })
+        b.tempCurve.contentDescription = "未来天气温度、天气和风力趋势"
     }
 
     private fun showNanshaDetails(snapshot: NanshaSnapshot) {
@@ -159,13 +252,18 @@ class MainActivity : AppCompatActivity() {
             snapshot.hourRain?.let { add("南沙小时雨量 $it mm") }
             snapshot.shortForecast?.let { add(it) }
         }
-        b.tvNanshaDetails.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
-        b.tvNanshaDetails.text = parts.joinToString("\n")
+        val text = parts.joinToString("\n").takeIf { it.isNotBlank() }
+        restoreNanshaDetails(text)
     }
 
     private fun showNanshaFallback() {
-        b.tvNanshaDetails.visibility = View.VISIBLE
-        b.tvNanshaDetails.text = "南沙天气暂不可用，当前显示番禺补齐数据"
+        restoreNanshaDetails("南沙天气暂不可用，当前显示番禺补齐数据")
+    }
+
+    private fun restoreNanshaDetails(text: String?) {
+        lastNanshaDetails = text
+        b.tvNanshaDetails.visibility = if (text.isNullOrBlank()) View.GONE else View.VISIBLE
+        b.tvNanshaDetails.text = text.orEmpty()
     }
 
     // ---------------- 雷达 ----------------
@@ -180,8 +278,16 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             setSupportZoom(true)
+            allowFileAccess = false
+            allowContentAccess = false
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(false)
+            safeBrowsingEnabled = true
         }
-        b.webRadar.webViewClient = WebViewClient()
+        b.webRadar.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                !isAllowedWebUrl(request.url.toString(), "nmc.cn")
+        }
         b.webRadar.setOnTouchListener { view, _ ->
             view.parent?.requestDisallowInterceptTouchEvent(true)
             false
@@ -194,6 +300,11 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             loadsImagesAutomatically = false
+            allowFileAccess = false
+            allowContentAccess = false
+            javaScriptCanOpenWindowsAutomatically = false
+            setSupportMultipleWindows(false)
+            safeBrowsingEnabled = true
         }
     }
 
@@ -206,6 +317,9 @@ class MainActivity : AppCompatActivity() {
             val web = b.webNanshaProbe
             var evaluated = false
             web.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                    !isAllowedWebUrl(request.url.toString(), "tqyb.com.cn")
+
                 override fun onPageFinished(view: WebView, url: String) {
                     if (evaluated || !continuation.isActive) return
                     evaluated = true
@@ -218,6 +332,9 @@ class MainActivity : AppCompatActivity() {
                                 continuation.resume(NanshaClient.parseRenderedText(text))
                             } catch (e: Exception) {
                                 continuation.resumeWithException(e)
+                            } finally {
+                                // 解析结束后释放隐藏页面资源；下次触发时再按需加载。
+                                view.post { runCatching { view.loadUrl("about:blank") } }
                             }
                         }
                     }, 5_000L)
@@ -231,7 +348,23 @@ class MainActivity : AppCompatActivity() {
     private fun loadRadar() {
         val radar = RadarRegions.item(prefs.regionKey)
         b.tvRadarTitle.text = "雷达图 · ${radar.name}"
+        b.webRadar.contentDescription = "中央气象台${radar.name}雷达图"
         b.webRadar.loadUrl(radar.url)
+    }
+
+    private fun restoreRadar(savedInstanceState: Bundle): Boolean {
+        val radar = RadarRegions.item(prefs.regionKey)
+        b.tvRadarTitle.text = "雷达图 · ${radar.name}"
+        b.webRadar.contentDescription = "中央气象台${radar.name}雷达图"
+        val state = savedInstanceState.getBundle(KEY_RADAR_WEBVIEW_STATE) ?: return false
+        return b.webRadar.restoreState(state) != null
+    }
+
+    private fun isAllowedWebUrl(url: String, domain: String): Boolean {
+        if (url == "about:blank") return true
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val host = uri.host?.lowercase(Locale.US) ?: return false
+        return uri.scheme in setOf("http", "https") && (host == domain || host.endsWith(".$domain"))
     }
 
     // ---------------- 城市 / 行政区 / 雷达设置 ----------------
@@ -304,9 +437,14 @@ class MainActivity : AppCompatActivity() {
                         areas.getOrNull(db.spNmcArea.selectedItemPosition - 1)
                     } else null
                     val rainKey = db.etQKey.text.toString().trim().takeIf { it.isNotEmpty() }
-                    val rainHost = db.etQHost.text.toString().trim().takeIf { it.isNotEmpty() }
+                    val rawRainHost = db.etQHost.text.toString().trim().takeIf { it.isNotEmpty() }
+                    val rainHost = rawRainHost?.let(QWeatherClient::normalizeHost)
                     if ((rainKey == null) != (rainHost == null)) {
-                        toast("降雨预测的 API Key 和 Host 需要同时填写，或同时留空")
+                        toast(if (rawRainHost != null && rainHost == null) {
+                            "API Host 格式无效，请填写 HTTPS 主机名，不要包含路径或参数"
+                        } else {
+                            "降雨预测的 API Key 和 Host 需要同时填写，或同时留空"
+                        })
                         return@setOnClickListener
                     }
 
@@ -323,22 +461,29 @@ class MainActivity : AppCompatActivity() {
                         }.id
                     }
 
-                    prefs.saveSelection(
-                        province = provinces.getOrNull(db.spProvince.selectedItemPosition)?.code,
-                        cityCode = city.code,
-                        cityName = city.name,
-                        areaCode = area?.code,
-                        areaName = area?.name,
-                        nanshaFallbackCode = if (area?.code == Prefs.NANSHA_AREA_CODE) {
-                            areas.firstOrNull { it.name.contains("番禺") }?.code
-                        } else null,
-                        region = radarKey,
-                        rainApiKey = rainKey,
-                        rainApiHost = rainHost
-                    )
+                    try {
+                        prefs.saveSelection(
+                            province = provinces.getOrNull(db.spProvince.selectedItemPosition)?.code,
+                            cityCode = city.code,
+                            cityName = city.name,
+                            areaCode = area?.code,
+                            areaName = area?.name,
+                            nanshaFallbackCode = if (area?.code == Prefs.NANSHA_AREA_CODE) {
+                                areas.firstOrNull { it.name.contains("番禺") }?.code
+                            } else null,
+                            region = radarKey,
+                            rainApiKey = rainKey,
+                            rainApiHost = rainHost
+                        )
+                    } catch (_: Exception) {
+                        toast("安全保存 API Key 失败，请重试或暂时留空")
+                        return@setOnClickListener
+                    }
                     dialog.dismiss()
+                    clearWeatherUiForNewLocation()
                     loadRadar()
-                    refreshAll(initial = true)
+                    restoreDiskCache()
+                    refreshAll(initial = true, force = true)
                 }
         }
         dialog.show()
@@ -448,6 +593,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRainLocked() {
+        rainUiState = RainUiState.Locked
         rainTapCount = 0
         b.llRainContent.visibility = View.GONE
         b.tvRainTapHint.visibility = View.VISIBLE
@@ -460,10 +606,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRainError(message: String?) {
+        val error = message ?: "请检查 Key / API Host / 网络"
+        rainUiState = RainUiState.Error(error)
         showRainContent()
         b.tvRainHeadline.text = "短临降水获取失败"
-        b.tvRainSummary.text = message ?: "请检查 Key / API Host / 网络"
+        b.tvRainSummary.text = error
         b.rainChart.setData(emptyList())
+        b.rainChart.contentDescription = "短临降水获取失败：$error"
     }
 
     private suspend fun refreshMinutely() {
@@ -487,11 +636,17 @@ class MainActivity : AppCompatActivity() {
             }
             bindMinutely(QWeatherClient.fetchMinutely(host, key, lon!!, lat!!))
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             showRainError(e.message)
         }
     }
 
-    private fun bindMinutely(data: MinutelyData) {
+    private fun bindMinutely(data: MinutelyData, persist: Boolean = true) {
+        if (persist) {
+            lastRainSavedAt = System.currentTimeMillis()
+            cache.saveRain(prefs.cacheKey, data, lastRainSavedAt)
+        }
+        rainUiState = RainUiState.Content(data)
         val next30 = data.points.take(6)
         val rainyPoints = next30.count { it.precip > 0.0 }
         val total = next30.sumOf { it.precip }
@@ -510,6 +665,15 @@ class MainActivity : AppCompatActivity() {
         }
         b.tvRainSummary.text = data.summary
         b.rainChart.setData(data.points.take(12).map { hm(it.time) to it.precip })
+        b.rainChart.contentDescription = "${b.tvRainHeadline.text}。${data.summary}"
+    }
+
+    private fun restoreRainState(state: RainUiState) {
+        when (state) {
+            RainUiState.Locked -> showRainLocked()
+            is RainUiState.Content -> bindMinutely(state.data, persist = false)
+            is RainUiState.Error -> showRainError(state.message)
+        }
     }
 
     private fun hm(value: String): String {
@@ -552,8 +716,74 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
+    private fun restoreDiskCache(): Boolean {
+        val cachedWeather = cache.loadWeather(prefs.cacheKey)
+        cachedWeather?.let {
+            lastWeatherSavedAt = it.savedAt
+            bind(it.data, updateWidget = false)
+            showUpdateStatus("正在更新，当前显示 ${formatCacheTime(it.savedAt)} 的缓存数据")
+        }
+        if (prefs.hasQWeather) {
+            cache.loadRain(prefs.cacheKey)?.let {
+                lastRainSavedAt = it.savedAt
+                bindMinutely(it.data, persist = false)
+            }
+        }
+        return cachedWeather != null
+    }
+
+    private fun clearWeatherUiForNewLocation() {
+        lastWeather = null
+        lastWeatherSavedAt = 0L
+        lastNanshaDetails = null
+        lastRainSavedAt = 0L
+        rainUiState = RainUiState.Locked
+        b.tvCity.text = "${prefs.cityName.orEmpty()}${prefs.areaName?.let { " · $it" }.orEmpty()} ▾"
+        b.tvPublishTime.text = ""
+        b.tvNowTemp.text = "--°"
+        b.tvNowInfo.text = "--"
+        b.tvNowFeels.text = "体感 --"
+        b.tvNowHumidity.text = "湿度 --"
+        b.tvNowWind.text = "风 --"
+        b.tvNowPressure.text = "气压 --"
+        b.tvNowAqi.text = "空气 --"
+        b.tvNanshaDetails.visibility = View.GONE
+        b.llHourly.removeAllViews()
+        b.tempCurve.setData(emptyList())
+        showRainLocked()
+        showUpdateStatus("正在获取新位置天气…")
+    }
+
+    private fun showWeatherError(message: String?) {
+        val reason = message ?: "网络错误"
+        val text = if (lastWeather != null && lastWeatherSavedAt > 0L) {
+            "更新失败，正在显示 ${formatCacheTime(lastWeatherSavedAt)} 的缓存数据：$reason"
+        } else {
+            "天气更新失败：$reason"
+        }
+        showUpdateStatus(text)
+    }
+
+    private fun showUpdateStatus(text: String) {
+        lastUpdateStatus = text
+        b.tvUpdateStatus.text = text
+        b.tvUpdateStatus.visibility = View.VISIBLE
+    }
+
+    private fun hideUpdateStatus() {
+        lastUpdateStatus = null
+        b.tvUpdateStatus.visibility = View.GONE
+        b.tvUpdateStatus.text = ""
+    }
+
+    private fun formatCacheTime(time: Long): String =
+        SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(time))
+
     override fun onStart() {
         super.onStart()
+        if (prefs.backgroundUpdatesPaused && b.tvUpdateStatus.visibility != View.VISIBLE) {
+            showUpdateStatus("后台更新已暂停，下拉刷新可恢复")
+        }
         foregroundRefreshJob?.cancel()
         foregroundRefreshJob = lifecycleScope.launch {
             while (isActive) {
@@ -581,7 +811,26 @@ class MainActivity : AppCompatActivity() {
         b.webRadar.onResume()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        val radarState = Bundle()
+        b.webRadar.saveState(radarState)
+        outState.putBundle(KEY_RADAR_WEBVIEW_STATE, radarState)
+        super.onSaveInstanceState(outState)
+    }
+
+    @Deprecated("Used intentionally to retain lightweight data across configuration changes")
+    override fun onRetainCustomNonConfigurationInstance(): Any = RetainedUiState(
+        weather = lastWeather,
+        weatherSavedAt = lastWeatherSavedAt,
+        nanshaDetails = lastNanshaDetails,
+        rain = rainUiState,
+        rainSavedAt = lastRainSavedAt,
+        updateStatus = lastUpdateStatus
+    )
+
     override fun onDestroy() {
+        refreshJob?.cancel()
+        refreshJob = null
         b.webRadar.apply {
             loadUrl("about:blank")
             stopLoading()

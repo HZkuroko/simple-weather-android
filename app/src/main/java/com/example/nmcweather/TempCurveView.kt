@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.AttributeSet
 import android.view.View
+import androidx.core.content.ContextCompat
 
 /** 一天的预报数据（用于未来5天气温曲线）。 */
 data class DayTemp(
@@ -51,20 +52,20 @@ class TempCurveView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER; isFakeBoldText = true
     }
     private val weekdayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#424242"); textSize = 11f * dp
+        color = ContextCompat.getColor(context, R.color.chart_weekday); textSize = 11f * dp
         textAlign = Paint.Align.CENTER; isFakeBoldText = true
     }
     private val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = 16f * dp; textAlign = Paint.Align.CENTER
     }
     private val infoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#333333"); textSize = 11f * dp; textAlign = Paint.Align.CENTER
+        color = ContextCompat.getColor(context, R.color.chart_info); textSize = 11f * dp; textAlign = Paint.Align.CENTER
     }
     private val windPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#757575"); textSize = 10f * dp; textAlign = Paint.Align.CENTER
+        color = ContextCompat.getColor(context, R.color.chart_axis_text); textSize = 10f * dp; textAlign = Paint.Align.CENTER
     }
     private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#9E9E9E"); textSize = 13f * dp; textAlign = Paint.Align.CENTER
+        color = ContextCompat.getColor(context, R.color.chart_hint); textSize = 13f * dp; textAlign = Paint.Align.CENTER
     }
 
     fun setData(d: List<DayTemp>) {
